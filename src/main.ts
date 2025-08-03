@@ -15,6 +15,22 @@ export default class ConvertToDocxPlugin extends Plugin {
         }
       })
     );
+
+	this.addCommand({
+		id: 'convert-md-to-docx',
+		name: 'Convert current note to DOCX',
+		checkCallback: (checking: boolean) => {
+			const file = this.app.workspace.getActiveFile();
+			if (file && file.extension === 'md') {
+			if (!checking) {
+				this.convertFile(file);
+			}
+			return true;
+			}
+			return false;
+		}
+	});
+
   }
 
   async convertFile(file: TFile) {
