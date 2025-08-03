@@ -4,13 +4,10 @@ import { FileExistsError, getErrorMessage } from './domains/Errors/ConversionErr
 import { ConfirmOverwriteModal } from './domains/Obsidian/ConfirmOverwriteModal';
 import { ConvertToDocxSettingTab, ConvertToDocxSettings, DEFAULT_SETTINGS } from './domains/Obsidian/ConvertToDocxSettingTab';
 
-
 export default class ConvertToDocxPlugin extends Plugin {
-
-  settings: ConvertToDocxSettings | undefined;
+  settings: ConvertToDocxSettings = DEFAULT_SETTINGS;
 
   async onload() {
-
     await this.loadSettings();
     this.addSettingTab(new ConvertToDocxSettingTab(this.app, this));
 
@@ -18,10 +15,10 @@ export default class ConvertToDocxPlugin extends Plugin {
       this.app.workspace.on('file-menu', (menu, file) => {
         if (file instanceof TFile && file.extension === 'md') {
           menu.addItem(item =>
-          item
-            .setTitle('Convert to DOCX')
-            .setIcon('document')
-            .onClick(() => this.convertFile(file))
+            item
+              .setTitle('Convert to DOCX')
+              .setIcon('document')
+              .onClick(() => this.convertFile(file))
           );
         }
       })
@@ -34,63 +31,83 @@ export default class ConvertToDocxPlugin extends Plugin {
         const file = this.app.workspace.getActiveFile();
         if (file && file.extension === 'md') {
           if (!checking) {
-              this.convertFile(file);
+            this.convertFile(file);
           }
           return true;
         }
         return false;
-      }
+      },
     });
   }
 
   async loadSettings() {
-    this.settings = Object.assign(
-      {},
-      DEFAULT_SETTINGS,
-      await this.loadData()
-    );
+    const data = await this.loadData();
+    Object.assign(this.settings, data ?? {});
   }
 
   async saveSettings() {
     await this.saveData(this.settings);
   }
 
-  async convertFile(file: TFile) {
-    const statusNotice = new Notice(`⏳ Converting "${file.name}"…`, 0);
+  /**
+   * Public entry point for converting a file, respects user overwrite setting.
+   */
+  async convertFile(file: TFile): Promise<void> {
+    return this.runConvert(file, this.settings.overwrite);
+  }
 
+  /**
+   * Core conversion logic with controlled retry/overwrite handling.
+   */
+  private async runConvert(file: TFile, overwriteFlag: boolean): Promise<void> {
+    const statusNotice = new Notice(`⏳ Converting "${file.name}"…`, 0);
     try {
-      const newPath = await DocxConverter.convertFile(file, this.app.vault, this.settings!.overwrite);
+      const newPath = await DocxConverter.convertFile(file, this.app.vault, overwriteFlag);
       statusNotice.hide();
       new Notice(`✅ Converted "${file.name}" → "${newPath}"`);
     } catch (err) {
       statusNotice.hide();
 
-      // 1) If it’s a FileExistsError, ask before overwriting
       if (err instanceof FileExistsError) {
-        
-        new ConfirmOverwriteModal(
-          this.app,
-          `A DOCX already exists at “${err.path}”. Overwrite?`,
-          async () => {
-            try {
-                // delete the existing file, then retry
-                await this.app.vault.adapter.remove(err.path);
-                // small delay so UI can settle
-                setTimeout(() => this.convertFile(file), 100);
-            } catch (e) {
-                console.error(e);
-                new Notice(
-                '❌ Failed to remove existing file: ' + (e as Error).message
-                );
-            }
+        if (overwriteFlag) {
+          try {
+            await this.app.vault.adapter.remove(err.path);
+            return this.runConvert(file, overwriteFlag);
+          } catch (removeErr) {
+            console.error('ConvertToDocxPlugin.overwriteError:', removeErr);
+            new Notice(
+              '❌ Failed to overwrite existing file: ' + (removeErr as Error).message
+            );
+            return;
           }
-        ).open();
-        return;
+        }
+        // prompt user for overwrite
+        return this.promptAndOverwrite(file, err.path);
       }
 
-      // 2) All other errors → friendly message
-      console.error(err);
+      console.error('ConvertToDocxPlugin.runConvert:', err);
       new Notice('❌ ' + getErrorMessage(err));
     }
+  }
+
+  /**
+   * Show a confirmation modal and retry conversion with overwrite enabled.
+   */
+  private promptAndOverwrite(file: TFile, existingPath: string): void {
+    new ConfirmOverwriteModal(
+      this.app,
+      `A DOCX already exists at "${existingPath}". Overwrite?`,
+      async () => {
+        try {
+          await this.app.vault.adapter.remove(existingPath);
+          await this.runConvert(file, true);
+        } catch (e) {
+          console.error('ConvertToDocxPlugin.promptOverwriteError:', e);
+          new Notice(
+            '❌ Failed to remove existing file: ' + (e as Error).message
+          );
+        }
+      }
+    ).open();
   }
 }
