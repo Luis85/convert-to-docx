@@ -18,12 +18,17 @@ export default class ConvertToDocxPlugin extends Plugin {
   }
 
   async convertFile(file: TFile) {
-    try {
-      const newPath = await DocxConverter.convertFile(file, this.app.vault);
-      new Notice(`✅ Converted "${file.name}" → "${newPath}"`);
-    } catch (err) {
-      console.error(err);
-      new Notice('❌ Conversion failed: ' + (err as Error).message);
-    }
-  }
+	// 1) show an in-progress notice
+	const statusNotice = new Notice(`⏳ Converting "${file.name}"…`, 0); // timeout = 0 → stays until .hide()
+
+	try {
+		const newPath = await DocxConverter.convertFile(file, this.app.vault);
+		statusNotice.hide();
+		new Notice(`✅ Converted "${file.name}" → "${newPath}"`);
+	} catch (err) {
+		statusNotice.hide();
+		console.error(err);
+		new Notice('❌ Conversion failed: ' + (err as Error).message);
+	}
+	}
 }
