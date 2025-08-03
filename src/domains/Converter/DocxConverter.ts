@@ -2,7 +2,8 @@ import MarkdownIt from 'markdown-it';
 import {
   Document,
   Packer,
-  Paragraph,
+  Paragraph, 
+  TextRun,
   HeadingLevel,
   SectionType,
 } from 'docx';
@@ -259,6 +260,24 @@ export class DocxConverter {
         case 'heading_close':
           break;
 
+        case 'fence': {
+          // token.info may contain the language, e.g. "js"
+          const language = (token.info || '').trim();
+          // Render entire code block as a single run in monospace
+          children.push(
+            new Paragraph({
+              spacing: { before: 200, after: 200 },
+              children: [
+                new TextRun({
+                  text: token.content,
+                  font: 'Courier New',
+                }),
+              ],
+            })
+          );
+          break;
+        }
+        
         default:
           unhandledTypes.add(token.type);
       }
