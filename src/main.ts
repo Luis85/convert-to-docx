@@ -1,5 +1,8 @@
 import { Plugin, TFile, Notice } from 'obsidian';
 import { DocxConverter } from './domains/Converter/DocxConverter';
+import { FileExistsError, getErrorMessage } from './domains/Errors/ConversionErrors';
+import { ConfirmOverwriteModal } from './domains/Obsidian/ConfirmOverwriteModal';
+
 
 export default class ConvertToDocxPlugin extends Plugin {
   onload() {
@@ -33,18 +36,42 @@ export default class ConvertToDocxPlugin extends Plugin {
 
   }
 
-  async convertFile(file: TFile) {
-	// 1) show an in-progress notice
-	const statusNotice = new Notice(`⏳ Converting "${file.name}"…`, 0); // timeout = 0 → stays until .hide()
+	async convertFile(file: TFile) {
+		const statusNotice = new Notice(`⏳ Converting "${file.name}"…`, 0);
 
-	try {
-		const newPath = await DocxConverter.convertFile(file, this.app.vault);
-		statusNotice.hide();
-		new Notice(`✅ Converted "${file.name}" → "${newPath}"`);
-	} catch (err) {
-		statusNotice.hide();
-		console.error(err);
-		new Notice('❌ Conversion failed: ' + (err as Error).message);
+		try {
+			const newPath = await DocxConverter.convertFile(file, this.app.vault);
+			statusNotice.hide();
+			new Notice(`✅ Converted "${file.name}" → "${newPath}"`);
+		} catch (err) {
+			statusNotice.hide();
+
+			// 1) If it’s a FileExistsError, ask before overwriting
+			if (err instanceof FileExistsError) {
+			new ConfirmOverwriteModal(
+				this.app,
+				`A DOCX already exists at “${err.path}”. Overwrite?`,
+				async () => {
+				try {
+					// delete the existing file, then retry
+					await this.app.vault.adapter.remove(err.path);
+					// small delay so UI can settle
+					setTimeout(() => this.convertFile(file), 100);
+				} catch (e) {
+					console.error(e);
+					new Notice(
+					'❌ Failed to remove existing file: ' + (e as Error).message
+					);
+				}
+				}
+			).open();
+			return;
+			}
+
+			// 2) All other errors → friendly message
+			console.error(err);
+			new Notice('❌ ' + getErrorMessage(err));
+		}
 	}
-	}
+
 }
