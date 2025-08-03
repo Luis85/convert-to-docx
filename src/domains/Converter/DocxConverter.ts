@@ -136,6 +136,7 @@ export class DocxConverter {
     
     if (unhandledTypes.size > 0) {
       console.warn(`[DocxConverter] Unhandled markdown token types:`);
+      console.log(Array.from(unhandledTypes).join(', '));
       console.table(unhandledTypes)
     }
 
