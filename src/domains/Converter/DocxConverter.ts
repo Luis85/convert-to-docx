@@ -60,26 +60,32 @@ export class DocxConverter {
 
   /**
    * Convenience: read a TFile from vault, convert, and write .docx beside it.
+   *
+   * @param overwrite  If true, skips the “file exists” guard and will overwrite silently.
+   *                   If false, throws FileExistsError when a .docx already exists.
    */
   public static async convertFile(
     file: TFile,
     vault: Vault,
+    overwrite = false,
   ): Promise<string> {
-    // Compute target path
     const target = file.path.replace(/\.md$/, '.docx');
 
-    // 1) Guard against overwrite
-    try {
-      if (await vault.adapter.exists(target)) {
-        throw new FileExistsError(target);
+    // 1) Guard against overwrite unless explicitly allowed
+    if (!overwrite) {
+      try {
+        if (await vault.adapter.exists(target)) {
+          throw new FileExistsError(target);
+        }
+      } catch (err) {
+        // if exists() itself threw, wrap it (unless it was our FileExistsError)
+        if (!(err instanceof FileExistsError)) {
+          throw new ConversionError(
+            'Error checking existing file: ' + (err as Error).message,
+          );
+        }
+        throw err;
       }
-    } catch (err) {
-      if (!(err instanceof FileExistsError)) {
-        throw new ConversionError(
-          'Error checking existing file: ' + (err as Error).message,
-        );
-      }
-      throw err;
     }
 
     // 2) Read source Markdown
@@ -100,7 +106,7 @@ export class DocxConverter {
       throw new InvalidMarkdownError((err as Error).message);
     }
 
-    // 4) Write out the DOCX
+    // 4) Write out the DOCX (will overwrite if overwrite=true)
     try {
       await vault.adapter.writeBinary(target, arrayBuffer);
     } catch (err) {
