@@ -1,5 +1,5 @@
 import MarkdownIt from 'markdown-it';
-import { Document, Packer, Paragraph, TextRun, HeadingLevel } from 'docx';
+import { Document, Packer, Paragraph, HeadingLevel } from 'docx';
 import type { TFile, Vault } from 'obsidian';
 import { InlineFormatter } from './InlineFormatter';
 import {
@@ -10,18 +10,88 @@ import {
 import type Token from 'markdown-it/lib/token.mjs';
 
 /**
- * Service to convert Markdown content into a .docx ArrayBuffer.
+ * Service to convert Markdown files into DOCX documents.
  */
 export class DocxConverter {
   /**
-   * Parses Markdown, builds a Word document, and returns an ArrayBuffer ready to write.
+   * Public entry: read, convert, and write.
+   * @param overwrite Skip existence check if true.
    */
-  public static async convert(mdContent: string): Promise<ArrayBuffer> {
-    // 1. Tokenize
-    const md = new MarkdownIt();
-    const tokens = md.parse(mdContent, {});
+  public static async convertFile(
+    file: TFile,
+    vault: Vault,
+    overwrite = false
+  ): Promise<string> {
+    const target = this.computeTargetPath(file);
 
-    // 2. Heading map
+    await this.guardOverwrite(target, vault, overwrite);
+
+    const mdContent = await this.readMarkdown(file, vault);
+    const buffer = await this.buildDocBuffer(mdContent);
+
+    await this.writeDocx(target, buffer, vault);
+    return target;
+  }
+
+  /** Compute a robust target path ending in .docx */
+  private static computeTargetPath(file: TFile): string {
+    // Remove last "." + extension from path
+    const extLength = file.extension.length + 1;
+    const base = file.path.slice(0, -extLength);
+    return `${base}.docx`;
+  }
+
+  /** Throw FileExistsError if target exists and overwrite is false */
+  private static async guardOverwrite(
+    target: string,
+    vault: Vault,
+    overwrite: boolean
+  ): Promise<void> {
+    if (overwrite) {
+      return;
+    }
+    try {
+      if (await vault.adapter.exists(target)) {
+        throw new FileExistsError(target);
+      }
+    } catch (err) {
+      if (err instanceof FileExistsError) {
+        throw err;
+      }
+      throw new ConversionError(
+        `Error checking existing file: ${(err as Error).message}`
+      );
+    }
+  }
+
+  /** Read the markdown content from vault or throw ConversionError */
+  private static async readMarkdown(
+    file: TFile,
+    vault: Vault
+  ): Promise<string> {
+    try {
+      return await vault.read(file);
+    } catch (err) {
+      throw new ConversionError(
+        `Failed to read source Markdown: ${(err as Error).message}`
+      );
+    }
+  }
+
+  /** Convert markdown content into a DOCX ArrayBuffer */
+  private static async buildDocBuffer(
+    mdContent: string
+  ): Promise<ArrayBuffer> {
+    let tokens: Token[];
+    try {
+      const md = new MarkdownIt();
+      tokens = md.parse(mdContent, {});
+    } catch (err) {
+      throw new InvalidMarkdownError(
+        `Markdown parsing failed: ${(err as Error).message}`
+      );
+    }
+
     const headingMap = {
       1: HeadingLevel.HEADING_1,
       2: HeadingLevel.HEADING_2,
@@ -31,90 +101,67 @@ export class DocxConverter {
       6: HeadingLevel.HEADING_6,
     } as const;
 
-    // 3. Build paragraphs
     const children: Paragraph[] = [];
     let currentLevel: 1 | 2 | 3 | 4 | 5 | 6 | undefined;
 
+    // Collect unique unhandled token types
+    const unhandledTypes = new Set<string>();
+
     for (const token of tokens) {
-      if (token.type === 'heading_open') {
-        currentLevel = parseInt(token.tag.slice(1), 10) as 1 | 2 | 3 | 4 | 5 | 6;
-      } else if (token.type === 'inline') {
-        const runs = InlineFormatter.format(token.children as Token[]);
-        children.push(
-          new Paragraph({
-            children: runs,
-            heading: currentLevel ? headingMap[currentLevel] : undefined,
-          }),
-        );
-        currentLevel = undefined;
+      switch (token.type) {
+        case 'heading_open':
+          currentLevel = Number(token.tag.slice(1)) as 1 | 2 | 3 | 4 | 5 | 6;
+          break;
+
+        case 'inline': {
+          const runs = InlineFormatter.format(token.children as Token[]);
+          children.push(
+            new Paragraph({
+              heading: currentLevel ? headingMap[currentLevel] : undefined,
+              children: runs,
+            })
+          );
+          currentLevel = undefined;
+          break;
+        }
+
+        // skip closing tokens silently
+        case 'heading_close':
+          break;
+
+        default:
+          unhandledTypes.add(token.type);
       }
     }
+    
+    if (unhandledTypes.size > 0) {
+      console.warn(`[DocxConverter] Unhandled markdown token types:`);
+      console.table(unhandledTypes)
+    }
 
-    // 4. Assemble document
-    const doc = new Document({ sections: [{ children }] });
-
-    // 5. Pack to Buffer then extract ArrayBuffer
-    const buffer = await Packer.toBuffer(doc);
-    return Uint8Array.from(buffer).buffer;
+    try {
+      const doc = new Document({ sections: [{ children }] });
+      const buffer = await Packer.toBuffer(doc);
+      return Uint8Array.from(buffer).buffer;
+    } catch (err) {
+      throw new ConversionError(
+        `DOCX generation failed: ${(err as Error).message}`
+      );
+    }
   }
 
-  /**
-   * Convenience: read a TFile from vault, convert, and write .docx beside it.
-   *
-   * @param overwrite  If true, skips the “file exists” guard and will overwrite silently.
-   *                   If false, throws FileExistsError when a .docx already exists.
-   */
-  public static async convertFile(
-    file: TFile,
-    vault: Vault,
-    overwrite = false,
-  ): Promise<string> {
-    const target = file.path.replace(/\.md$/, '.docx');
-
-    // 1) Guard against overwrite unless explicitly allowed
-    if (!overwrite) {
-      try {
-        if (await vault.adapter.exists(target)) {
-          throw new FileExistsError(target);
-        }
-      } catch (err) {
-        // if exists() itself threw, wrap it (unless it was our FileExistsError)
-        if (!(err instanceof FileExistsError)) {
-          throw new ConversionError(
-            'Error checking existing file: ' + (err as Error).message,
-          );
-        }
-        throw err;
-      }
-    }
-
-    // 2) Read source Markdown
-    let mdContent: string;
+  /** Write the ArrayBuffer to the vault, overwriting if allowed */
+  private static async writeDocx(
+    target: string,
+    buffer: ArrayBuffer,
+    vault: Vault
+  ): Promise<void> {
     try {
-      mdContent = await vault.read(file);
+      await vault.adapter.writeBinary(target, buffer);
     } catch (err) {
       throw new ConversionError(
-        'Failed to read source Markdown: ' + (err as Error).message,
+        `Failed to write DOCX file: ${(err as Error).message}`
       );
     }
-
-    // 3) Convert to ArrayBuffer
-    let arrayBuffer: ArrayBuffer;
-    try {
-      arrayBuffer = await DocxConverter.convert(mdContent);
-    } catch (err) {
-      throw new InvalidMarkdownError((err as Error).message);
-    }
-
-    // 4) Write out the DOCX (will overwrite if overwrite=true)
-    try {
-      await vault.adapter.writeBinary(target, arrayBuffer);
-    } catch (err) {
-      throw new ConversionError(
-        'Failed to write DOCX file: ' + (err as Error).message,
-      );
-    }
-
-    return target;
   }
 }
