@@ -4,6 +4,10 @@ import {
   Packer,
   Paragraph, 
   TextRun,
+  Table,
+  TableRow,
+  TableCell,
+  WidthType,
   HeadingLevel,
   SectionType,
 } from 'docx';
@@ -16,6 +20,16 @@ import {
 } from '../Errors/ConversionErrors';
 import type Token from 'markdown-it/lib/token.mjs';
 import type { ConvertToDocxSettings } from '../Obsidian/ConvertToDocxSettingTab';
+
+type ListType = 'bullet' | 'ordered';
+
+interface TableState {
+  inHeader: boolean;
+  rows: TableRow[];
+  currentCells: TableCell[];
+  cellRuns: TextRun[];
+  inCell: boolean;
+}
 
 export class DocxConverter {
   /**
@@ -217,7 +231,9 @@ export class DocxConverter {
   /**
    * Convert the remaining markdown-it tokens into docx Paragraphs.
    */
-  private static convertTokensToDocxParagraphs(tokens: Token[]): Paragraph[] {
+    private static convertTokensToDocxParagraphs(
+    tokens: Token[]
+  ): (Paragraph | Table)[] {
     const headingMap = {
       1: HeadingLevel.HEADING_1,
       2: HeadingLevel.HEADING_2,
@@ -227,12 +243,47 @@ export class DocxConverter {
       6: HeadingLevel.HEADING_6,
     } as const;
 
-    const children: Paragraph[] = [];
+    const elements: (Paragraph | Table)[] = [];
     let currentLevel: 1 | 2 | 3 | 4 | 5 | 6 | undefined;
     const unhandledTypes = new Set<string>();
 
+    // — LIST STATE —
+    const listStack: { type: ListType; counter: number }[] = [];
+    let isInListItem = false;
+
+    // — TABLE STATE —
+    let tableState: TableState | null = null;
+
     for (const token of tokens) {
       switch (token.type) {
+        // —— LISTS ——
+        case 'bullet_list_open':
+          listStack.push({ type: 'bullet', counter: 0 });
+          break;
+        case 'ordered_list_open':
+          listStack.push({ type: 'ordered', counter: 0 });
+          break;
+        case 'bullet_list_close':
+        case 'ordered_list_close':
+          listStack.pop();
+          break;
+
+        case 'list_item_open':
+          if (listStack.length > 0 && listStack[listStack.length - 1].type === 'ordered') {
+            listStack[listStack.length - 1].counter++;
+          }
+          isInListItem = true;
+          break;
+        case 'list_item_close':
+          isInListItem = false;
+          break;
+
+        // —— PARAGRAPHS & HEADINGS ——
+        case 'paragraph_open':
+          // emit on inline
+          break;
+        case 'paragraph_close':
+          break;
         case 'heading_open':
           currentLevel = Number(token.tag.slice(1)) as
             | 1
@@ -242,29 +293,12 @@ export class DocxConverter {
             | 5
             | 6;
           break;
-
-        case 'inline': {
-          const runs = InlineFormatter.format(token.children as Token[]);
-          children.push(
-            new Paragraph({
-              heading: currentLevel
-                ? headingMap[currentLevel]
-                : undefined,
-              children: runs,
-            })
-          );
-          currentLevel = undefined;
-          break;
-        }
-
         case 'heading_close':
           break;
 
+        // —— FENCES ——
         case 'fence': {
-          // token.info may contain the language, e.g. "js"
-          const language = (token.info || '').trim();
-          // Render entire code block as a single run in monospace
-          children.push(
+          elements.push(
             new Paragraph({
               spacing: { before: 200, after: 200 },
               children: [
@@ -277,7 +311,103 @@ export class DocxConverter {
           );
           break;
         }
-        
+
+        // —— TABLES ——
+        case 'table_open':
+          tableState = {
+            inHeader: false,
+            rows: [],
+            currentCells: [],
+            cellRuns: [],
+            inCell: false,
+          };
+          break;
+        case 'thead_open':
+          if (tableState) tableState.inHeader = true;
+          break;
+        case 'thead_close':
+          // leave header mode
+          break;
+        case 'tbody_open':
+          if (tableState) tableState.inHeader = false;
+          break;
+        case 'tbody_close':
+          break;
+        case 'tr_open':
+          if (tableState) tableState.currentCells = [];
+          break;
+        case 'tr_close':
+          if (tableState) {
+            tableState.rows.push(
+              new TableRow({ children: tableState.currentCells })
+            );
+          }
+          break;
+        case 'th_open':
+        case 'td_open':
+          if (tableState) {
+            tableState.cellRuns = [];
+            tableState.inCell = true;
+          }
+          break;
+        case 'th_close':
+        case 'td_close':
+          if (tableState && tableState.inCell) {
+            // wrap collected runs in a Paragraph + TableCell
+            const cellPara = new Paragraph({
+              children: tableState.cellRuns,
+            });
+            tableState.currentCells.push(
+              new TableCell({ children: [cellPara] })
+            );
+            tableState.inCell = false;
+          }
+          break;
+        case 'table_close':
+          if (tableState) {
+            elements.push(
+              new Table({
+                rows: tableState.rows,
+                width: { size: 100, type: WidthType.PERCENTAGE },
+              })
+            );
+            tableState = null;
+          }
+          break;
+
+        // —— INLINE CONTENT ——
+        case 'inline': {
+          // inside a table cell?
+          if (tableState && tableState.inCell) {
+            const runs = InlineFormatter.format(token.children as Token[]);
+            tableState.cellRuns.push(...runs);
+          }
+          // list item?
+          else if (isInListItem && listStack.length > 0) {
+            const { type, counter } = listStack[listStack.length - 1];
+            const prefix = type === 'bullet' ? '• ' : `${counter}. `;
+            const runs = InlineFormatter.format(token.children as Token[]);
+            elements.push(
+              new Paragraph({
+                indent: { left: 720 * listStack.length },
+                children: [new TextRun({ text: prefix }), ...runs],
+              })
+            );
+          }
+          // normal paragraph or heading
+          else {
+            const runs = InlineFormatter.format(token.children as Token[]);
+            elements.push(
+              new Paragraph({
+                heading: currentLevel ? headingMap[currentLevel] : undefined,
+                children: runs,
+              })
+            );
+            currentLevel = undefined;
+          }
+          break;
+        }
+
         default:
           unhandledTypes.add(token.type);
       }
@@ -291,7 +421,7 @@ export class DocxConverter {
       );
     }
 
-    return children;
+    return elements;
   }
 
   /** Write the ArrayBuffer to the vault, overwriting if allowed */
