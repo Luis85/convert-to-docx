@@ -3,12 +3,18 @@ import { Setting } from 'obsidian';
 import ConvertToDocxPlugin from '../../main';
 
 export interface ConvertToDocxSettings {
-  /** When true, overwrite existing .docx files automatically */
+  // When true, overwrite existing .docx files automatically
   overwrite: boolean;
+  // add a cover page to the document
+  includeCoverPage: boolean;
+  // add a table of contents to the document
+  includeToc: boolean;
 }
 
 export const DEFAULT_SETTINGS: ConvertToDocxSettings = {
-  overwrite: false,
+  overwrite: true,
+  includeCoverPage: true,
+  includeToc: true,
 };
 
 export class ConvertToDocxSettingTab extends PluginSettingTab {
@@ -32,6 +38,30 @@ export class ConvertToDocxSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings!.overwrite)
           .onChange(async (value) => {
             this.plugin.settings!.overwrite = value;
+            await this.plugin.saveSettings();
+          })
+      );
+
+      new Setting(containerEl)
+      .setName('Include Cover Page')
+      .setDesc('If enabled, insert a cover page with file name, first H1, and summary.')
+      .addToggle(toggle =>
+        toggle
+          .setValue(this.plugin.settings.includeCoverPage)
+          .onChange(async (value) => {
+            this.plugin.settings.includeCoverPage = value;
+            await this.plugin.saveSettings();
+          })
+      );
+
+      new Setting(containerEl)
+      .setName('Create Placeholder for TOC')
+      .setDesc('If enabled, insert a blank page before the documents content for a potential table of contents.')
+      .addToggle(toggle =>
+        toggle
+          .setValue(this.plugin.settings.includeToc)
+          .onChange(async (value) => {
+            this.plugin.settings.includeToc = value;
             await this.plugin.saveSettings();
           })
       );

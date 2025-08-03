@@ -1,5 +1,11 @@
 import MarkdownIt from 'markdown-it';
-import { Document, Packer, Paragraph, HeadingLevel } from 'docx';
+import {
+  Document,
+  Packer,
+  Paragraph,
+  HeadingLevel,
+  SectionType,
+} from 'docx';
 import type { TFile, Vault } from 'obsidian';
 import { InlineFormatter } from './InlineFormatter';
 import {
@@ -8,26 +14,22 @@ import {
   ConversionError,
 } from '../Errors/ConversionErrors';
 import type Token from 'markdown-it/lib/token.mjs';
+import type { ConvertToDocxSettings } from '../Obsidian/ConvertToDocxSettingTab';
 
-/**
- * Service to convert Markdown files into DOCX documents.
- */
 export class DocxConverter {
   /**
    * Public entry: read, convert, and write.
-   * @param overwrite Skip existence check if true.
    */
   public static async convertFile(
     file: TFile,
     vault: Vault,
-    overwrite = false
+    settings: ConvertToDocxSettings
   ): Promise<string> {
     const target = this.computeTargetPath(file);
-
-    await this.guardOverwrite(target, vault, overwrite);
+    await this.guardOverwrite(target, vault, settings.overwrite);
 
     const mdContent = await this.readMarkdown(file, vault);
-    const buffer = await this.buildDocBuffer(mdContent);
+    const buffer = await this.buildDocBuffer(mdContent, settings, file.name);
 
     await this.writeDocx(target, buffer, vault);
     return target;
@@ -35,7 +37,6 @@ export class DocxConverter {
 
   /** Compute a robust target path ending in .docx */
   private static computeTargetPath(file: TFile): string {
-    // Remove last "." + extension from path
     const extLength = file.extension.length + 1;
     const base = file.path.slice(0, -extLength);
     return `${base}.docx`;
@@ -47,17 +48,13 @@ export class DocxConverter {
     vault: Vault,
     overwrite: boolean
   ): Promise<void> {
-    if (overwrite) {
-      return;
-    }
+    if (overwrite) return;
     try {
       if (await vault.adapter.exists(target)) {
         throw new FileExistsError(target);
       }
     } catch (err) {
-      if (err instanceof FileExistsError) {
-        throw err;
-      }
+      if (err instanceof FileExistsError) throw err;
       throw new ConversionError(
         `Error checking existing file: ${(err as Error).message}`
       );
@@ -78,9 +75,11 @@ export class DocxConverter {
     }
   }
 
-  /** Convert markdown content into a DOCX ArrayBuffer */
+  /** Build the DOCX buffer from markdown + settings */
   private static async buildDocBuffer(
-    mdContent: string
+    mdContent: string,
+    settings: ConvertToDocxSettings,
+    fileName: string
   ): Promise<ArrayBuffer> {
     let tokens: Token[];
     try {
@@ -92,6 +91,132 @@ export class DocxConverter {
       );
     }
 
+    try {
+      const doc = this.buildDocument(tokens, settings, fileName);
+      const buffer = await Packer.toBuffer(doc);
+      return Uint8Array.from(buffer).buffer;
+    } catch (err) {
+      throw new ConversionError(
+        `DOCX generation failed: ${(err as Error).message}`
+      );
+    }
+  }
+
+  /**
+   * Compose a `docx.Document` given tokens + user settings.
+   */
+  private static buildDocument(
+    tokens: Token[],
+    settings: ConvertToDocxSettings,
+    fileName: string
+  ): Document {
+    let workingTokens = [...tokens];
+    const sections: any[] = [];
+
+    // — COVER PAGE —
+    if (settings.includeCoverPage) {
+      const { title, subtitle, summary, bodyTokens } = this.extractCoverPageData(workingTokens, fileName);
+      
+      const coverParas: Paragraph[] = [
+        new Paragraph({
+          text: title,
+          heading: HeadingLevel.TITLE,
+          //alignment: AlignmentType.CENTER,
+        }),
+      ];
+      if (subtitle) {
+        coverParas.push(
+          new Paragraph({
+            text: subtitle,
+            heading: HeadingLevel.HEADING_1,
+            //alignment: AlignmentType.CENTER,
+          })
+        );
+      }
+      if (summary) {
+        coverParas.push(
+          new Paragraph({
+            text: summary,
+            //alignment: AlignmentType.CENTER,
+          })
+        );
+      }
+
+      sections.push({ children: coverParas });
+      workingTokens = bodyTokens;
+    }
+
+    // — TABLE OF CONTENTS —
+    if (settings.includeToc) {
+      // we just create a placeholder as programmatically created tocs prompt the user to allow them everytime he opens the doc
+      sections.push({
+        properties: settings.includeCoverPage
+          ? { type: SectionType.NEXT_PAGE }
+          : undefined,
+        children: [
+          new Paragraph({
+            text: 'Insert TOC here',
+            heading: HeadingLevel.HEADING_2,
+          })
+        ],
+      });
+    }
+
+    // — MAIN BODY —
+    sections.push({
+      properties:
+        settings.includeCoverPage || settings.includeToc
+          ? { type: SectionType.NEXT_PAGE }
+          : undefined,
+      children: this.convertTokensToDocxParagraphs(workingTokens),
+    });
+
+    return new Document({ sections });
+  }
+
+  /**
+   * From tokens, extract cover-page fields and return the remaining body tokens.
+   */
+  private static extractCoverPageData(
+    tokens: Token[],
+    fileName: string
+  ): {
+    title: string;
+    subtitle: string;
+    summary: string;
+    bodyTokens: Token[];
+  } {
+    const baseName = fileName.replace(/\.md$/, '');
+    let subtitle = '';
+    let summary = '';
+    const bodyTokens = [...tokens];
+
+    const index = tokens.findIndex(
+      (token) => token.type === 'heading_open' && token.tag === 'h1'
+    );
+    if (index !== -1) {
+      subtitle = tokens[index + 1].content;
+      // Check for an inline paragraph immediately after H1
+      if (
+        tokens[index + 2]?.type === 'heading_close' &&
+        tokens[index + 3]?.type === 'paragraph_open'
+      ) {
+        summary = tokens[index + 4].content;
+        // Remove: h1_open, inline, h1_close, summary_inline, summary_close (5 tokens)
+        bodyTokens.splice(index, 5);
+      } else {
+        // Remove only the H1 tokens
+        bodyTokens.splice(index, 3);
+      }
+    }
+
+    return { title: baseName, subtitle, summary, bodyTokens };
+  }
+
+  /**
+   * Convert the remaining markdown-it tokens into docx Paragraphs.
+   */
+  private static convertTokensToDocxParagraphs(tokens: Token[]): Paragraph[] {
     const headingMap = {
       1: HeadingLevel.HEADING_1,
       2: HeadingLevel.HEADING_2,
@@ -103,21 +228,27 @@ export class DocxConverter {
 
     const children: Paragraph[] = [];
     let currentLevel: 1 | 2 | 3 | 4 | 5 | 6 | undefined;
-
-    // Collect unique unhandled token types
     const unhandledTypes = new Set<string>();
 
     for (const token of tokens) {
       switch (token.type) {
         case 'heading_open':
-          currentLevel = Number(token.tag.slice(1)) as 1 | 2 | 3 | 4 | 5 | 6;
+          currentLevel = Number(token.tag.slice(1)) as
+            | 1
+            | 2
+            | 3
+            | 4
+            | 5
+            | 6;
           break;
 
         case 'inline': {
           const runs = InlineFormatter.format(token.children as Token[]);
           children.push(
             new Paragraph({
-              heading: currentLevel ? headingMap[currentLevel] : undefined,
+              heading: currentLevel
+                ? headingMap[currentLevel]
+                : undefined,
               children: runs,
             })
           );
@@ -125,7 +256,6 @@ export class DocxConverter {
           break;
         }
 
-        // skip closing tokens silently
         case 'heading_close':
           break;
 
@@ -133,22 +263,16 @@ export class DocxConverter {
           unhandledTypes.add(token.type);
       }
     }
-    
-    if (unhandledTypes.size > 0) {
-      console.warn(`[DocxConverter] Unhandled markdown token types:`);
-      console.log(Array.from(unhandledTypes).join(', '));
-      console.table(unhandledTypes)
-    }
 
-    try {
-      const doc = new Document({ sections: [{ children }] });
-      const buffer = await Packer.toBuffer(doc);
-      return Uint8Array.from(buffer).buffer;
-    } catch (err) {
-      throw new ConversionError(
-        `DOCX generation failed: ${(err as Error).message}`
+    if (unhandledTypes.size > 0) {
+      console.warn(
+        `[DocxConverter] Unhandled markdown token types: ${Array.from(
+          unhandledTypes
+        ).join(', ')}`
       );
     }
+
+    return children;
   }
 
   /** Write the ArrayBuffer to the vault, overwriting if allowed */

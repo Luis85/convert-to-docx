@@ -62,7 +62,11 @@ export default class ConvertToDocxPlugin extends Plugin {
   private async runConvert(file: TFile, overwriteFlag: boolean): Promise<void> {
     const statusNotice = new Notice(`⏳ Converting "${file.name}"…`, 0);
     try {
-      const newPath = await DocxConverter.convertFile(file, this.app.vault, overwriteFlag);
+      const newPath = await DocxConverter.convertFile(
+        file,
+        this.app.vault,
+        this.settings
+      );
       statusNotice.hide();
       new Notice(`✅ Converted "${file.name}" → "${newPath}"`);
     } catch (err) {
@@ -75,9 +79,7 @@ export default class ConvertToDocxPlugin extends Plugin {
             return this.runConvert(file, overwriteFlag);
           } catch (removeErr) {
             console.error('ConvertToDocxPlugin.overwriteError:', removeErr);
-            new Notice(
-              '❌ Failed to overwrite existing file: ' + (removeErr as Error).message
-            );
+            new Notice('❌ Failed to overwrite existing file: ' + (removeErr as Error).message);
             return;
           }
         }
