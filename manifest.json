@@ -1,0 +1,10 @@
+{
+  "id": "convert-to-docx",
+  "name": "Convert to Docx",
+  "version": "0.0.1",
+  "minAppVersion": "1.18.0",
+  "description": "A plugin to convert .md to .docx",
+  "author": "Luis Mendez",
+  "authorUrl": "https://luis-mendez.de",
+  "isDesktopOnly": true
+}
