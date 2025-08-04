@@ -10,6 +10,7 @@ import {
   WidthType,
   HeadingLevel,
   SectionType,
+  BorderStyle,
 } from 'docx';
 import type { TFile, Vault } from 'obsidian';
 import { InlineFormatter } from './InlineFormatter';
@@ -231,7 +232,7 @@ export class DocxConverter {
   /**
    * Convert the remaining markdown-it tokens into docx Paragraphs.
    */
-    private static convertTokensToDocxParagraphs(
+  private static convertTokensToDocxParagraphs(
     tokens: Token[]
   ): (Paragraph | Table)[] {
     const headingMap = {
@@ -254,8 +255,38 @@ export class DocxConverter {
     // — TABLE STATE —
     let tableState: TableState | null = null;
 
+    // Blockquote state
+    let isInBlockquote = false;
+
     for (const token of tokens) {
       switch (token.type) {
+
+        // —— HORIZONTAL RULE ——
+        case 'hr': {
+          elements.push(
+            new Paragraph({
+              border: {
+                bottom: {
+                  style: BorderStyle.SINGLE,
+                  size: 6,
+                  color: 'auto',
+                },
+              },
+              spacing: { before: 200, after: 200 },
+              children: [],
+            })
+          );
+          break;
+        }
+
+        // —— BLOCKQUOTE ——
+        case 'blockquote_open':
+          isInBlockquote = true;
+          break;
+        case 'blockquote_close':
+          isInBlockquote = false;
+          break;
+
         // —— LISTS ——
         case 'bullet_list_open':
           listStack.push({ type: 'bullet', counter: 0 });
@@ -381,6 +412,23 @@ export class DocxConverter {
           if (tableState && tableState.inCell) {
             const runs = InlineFormatter.format(token.children as Token[]);
             tableState.cellRuns.push(...runs);
+          }
+          // blockquote?
+          if (isInBlockquote) {
+            const runs = InlineFormatter.format(token.children as Token[]);
+            elements.push(
+              new Paragraph({
+                indent: { left: 720 },
+                border: {
+                  left: {
+                    style: BorderStyle.SINGLE,
+                    size: 4,
+                    color: 'auto',
+                  },
+                },
+                children: runs,
+              })
+            );
           }
           // list item?
           else if (isInListItem && listStack.length > 0) {
