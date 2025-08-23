@@ -11,9 +11,19 @@ export class InlineFormatter {
     const runs: TextRun[] = [];
     let isBold = false;
     let isItalic = false;
+    let isCode = false;
 
     for (const child of children) {
       switch (child.type) {
+        case 'code_inline':
+          // Inline-Code in Monospace
+          runs.push(
+            new TextRun({
+              text: child.content,
+              font: 'Courier New',
+            })
+          );
+          break;
         case 'strong_open':
           isBold = true;
           break;
@@ -26,6 +36,11 @@ export class InlineFormatter {
         case 'em_close':
           isItalic = false;
           break;
+        case 'softbreak':
+        case 'hardbreak':
+          // Zeilenumbruch
+          runs.push(new TextRun({ text: '\n' }));
+          break;
         case 'text':
           runs.push(
             new TextRun({
@@ -35,7 +50,6 @@ export class InlineFormatter {
             })
           );
           break;
-        // ignore other inline types for now
       }
     }
 
